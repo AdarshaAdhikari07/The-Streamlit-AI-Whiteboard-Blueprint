@@ -4,8 +4,19 @@ import cv2
 import numpy as np
 import mediapipe as mp
 
-# Modern MediaPipe sub-module assignment logic
-mp_hands = mp.solutions.hands
+# ====================================================================
+# BULLETPROOF ADAPTIVE NAMESPACE CHECK FOR CLOUD SERVERS
+# ====================================================================
+if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'hands'):
+    mp_hands = mp.solutions.hands
+elif hasattr(mp, 'hands'):
+    mp_hands = mp.hands
+else:
+    try:
+        import mediapipe.python.solutions.hands as mp_hands
+    except ModuleNotFoundError:
+        import mediapipe as mp_hands
+# ====================================================================
 
 # Configure page settings
 st.set_page_config(page_title="AI Virtual Whiteboard", layout="wide")
@@ -58,7 +69,7 @@ class WhiteboardProcessor(VideoTransformerBase):
     def transform(self, frame):
         # 1. Convert WebRTC frame to numpy array (BGR)
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1) # Natural horizontal mirroring mirror matching
+        img = cv2.flip(img, 1) # Natural horizontal mirroring matching
         h, w, c = img.shape
 
         # 2. Dynamic tracking canvas initialization
