@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import mediapipe as mp
 
-# Modern MediaPipe sub-module assignment logic
+# Use standard module mapping for modern MediaPipe distributions
 mp_hands = mp.solutions.hands
 
 # Configure page settings
