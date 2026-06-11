@@ -4,19 +4,14 @@ import cv2
 import numpy as np
 import mediapipe as mp
 
-# ====================================================================
-# BULLETPROOF ADAPTIVE NAMESPACE CHECK FOR CLOUD SERVERS
-# ====================================================================
-if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'hands'):
-    mp_hands = mp.solutions.hands
-elif hasattr(mp, 'hands'):
-    mp_hands = mp.hands
-else:
-    try:
-        import mediapipe.python.solutions.hands as mp_hands
-    except ModuleNotFoundError:
-        import mediapipe as mp_hands
-# ====================================================================
+# FORCE MEDIAPIPE TO INITIALIZE SOLUTIONS ON LINUX CONTAINER THREADS
+try:
+    if not hasattr(mp, 'solutions') or not hasattr(mp.solutions, 'hands'):
+        import mediapipe.solutions.hands as mp_hands
+    else:
+        mp_hands = mp.solutions.hands
+except ModuleNotFoundError:
+    import mediapipe.python.solutions.hands as mp_hands
 
 # Configure page settings
 st.set_page_config(page_title="AI Virtual Whiteboard", layout="wide")
@@ -53,6 +48,7 @@ if "canvas" not in st.session_state:
 # Secure the model instance via Streamlit resource caching across background frames
 @st.cache_resource
 def get_hands_detector():
+    # Force direct constructor instantiation call
     return mp_hands.Hands(
         static_image_mode=False,
         max_num_hands=1,
