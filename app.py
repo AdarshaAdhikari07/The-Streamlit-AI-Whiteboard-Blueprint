@@ -4,13 +4,8 @@ import cv2
 import numpy as np
 import mediapipe as mp
 
-# ====================================================================
-# MODERN MEDIAPIPE TASKS API SETUP (MATCHES PACKAGES ON LINUX SERVER)
-# ====================================================================
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
+# Modern MediaPipe sub-module assignment logic
+mp_hands = mp.solutions.hands
 
 # Configure page settings
 st.set_page_config(page_title="AI Virtual Whiteboard", layout="wide")
@@ -21,10 +16,6 @@ st.subheader("Draw in the air using your webcam and MediaPipe!")
 st.sidebar.header("🎨 Canvas Settings")
 color_choice = st.sidebar.selectbox("Select Color:", ["Blue", "Green", "Red", "Eraser"])
 brush_thickness = st.sidebar.slider("Brush Thickness:", min_value=5, max_value=50, value=10)
-
-if st.sidebar.button("Clear Canvas"):
-    st.session_state["canvas"] = None
-    st.success("Canvas cleared!")
 
 # Map colors to BGR (OpenCV format)
 color_map = {
@@ -40,68 +31,53 @@ RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-# Initialize canvas state securely
-if "canvas" not in st.session_state:
-    st.session_state["canvas"] = None
-
-# Secure the landmarker instance via Streamlit resource caching
+# Secure the model instance via Streamlit resource caching across background frames
 @st.cache_resource
-def get_hand_landmarker():
-    # Uses a live-stream optimized constructor pattern
-    options = HandLandmarkerOptions(
-        base_options=BaseOptions(model_asset_buffer=None), # Uses embedded framework assets
-        running_mode=VisionRunningMode.IMAGE,
-        num_hands=1,
-        min_hand_detection_confidence=0.7,
-        min_hand_presence_confidence=0.7
+def get_hands_detector():
+    return mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=1,
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.7
     )
-    return HandLandmarker.create_from_options(options)
 
-try:
-    landmarker = get_hand_landmarker()
-except Exception:
-    # Fail-safe fallback if embedded binary assets require standard instantiation
-    landmarker = None
+hands = get_hands_detector()
 
 class WhiteboardProcessor(VideoTransformerBase):
     def __init__(self):
         self.xp, self.yp = 0, 0  # Drawing tracking points anchor
+        self.canvas = None       # THREAD-SAFE: Canvas stays isolated inside the video thread
+        self.clear_request = False
 
     def transform(self, frame):
         # 1. Convert WebRTC frame to numpy array (BGR)
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1) # Mirror matching
+        img = cv2.flip(img, 1) # Mirror image matching
         h, w, c = img.shape
 
-        # 2. Dynamic tracking canvas initialization
-        if st.session_state["canvas"] is None or st.session_state["canvas"].shape[:2] != (h, w):
-            st.session_state["canvas"] = np.zeros((h, w, 3), dtype=np.uint8)
+        # 2. Local canvas initialization (Prevents global thread collisions)
+        if self.canvas is None or self.canvas.shape[:2] != (h, w):
+            self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
-        # 3. Modern Processing Pipeline
+        if self.clear_request:
+            self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
+            self.clear_request = False
+
+        # 3. MediaPipe processing pipeline
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-        
-        # Safe detection fallback check
-        if landmarker is not None:
-            results = landmarker.detect(mp_image)
-            has_landmarks = hasattr(results, 'hand_landmarks') and results.hand_landmarks
-        else:
-            has_landmarks = False
+        results = hands.process(img_rgb)
 
-        if has_landmarks:
-            for hand_landmarks in results.hand_landmarks:
-                # Fetch index tip (Index 8) and middle tip (Index 12)
-                idx_tip = hand_landmarks[8]
-                mid_tip = hand_landmarks[12]
-                idx_pip = hand_landmarks[6]
-                mid_pip = hand_landmarks[10]
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                landmarks = hand_landmarks.landmark
                 
-                # Convert normalized coordinates to screen pixel space
-                cx_idx, cy_idx = int(idx_tip.x * w), int(idx_tip.y * h)
-                
-                # Finger detection math checking (Lower Y value means higher on screen)
-                index_up = idx_tip.y < idx_pip.y
-                middle_up = mid_tip.y < mid_pip.y
+                # Convert normalized coordinates to pixel locations
+                cx_idx, cy_idx = int(landmarks[8].x * w), int(landmarks[8].y * h)
+                cx_mid, cy_mid = int(landmarks[12].x * w), int(landmarks[12].y * h)
+
+                # Finger detection math checking
+                index_up = landmarks[8].y < landmarks[6].y
+                middle_up = landmarks[12].y < landmarks[10].y
 
                 # MODE 1: Selection Mode (Index + Middle finger raised)
                 if index_up and middle_up:
@@ -115,11 +91,11 @@ class WhiteboardProcessor(VideoTransformerBase):
                     if self.xp == 0 and self.yp == 0:
                         self.xp, self.yp = cx_idx, cy_idx
 
-                    # Apply line transformation logic straight to persistence canvas matrix
+                    # Apply line logic directly onto the localized thread canvas matrix
                     if color_choice == "Eraser":
-                        cv2.line(st.session_state["canvas"], (self.xp, self.yp), (cx_idx, cy_idx), (0, 0, 0), brush_thickness * 2)
+                        cv2.line(self.canvas, (self.xp, self.yp), (cx_idx, cy_idx), (0, 0, 0), brush_thickness * 2)
                     else:
-                        cv2.line(st.session_state["canvas"], (self.xp, self.yp), (cx_idx, cy_idx), current_color, brush_thickness)
+                        cv2.line(self.canvas, (self.xp, self.yp), (cx_idx, cy_idx), current_color, brush_thickness)
                     
                     self.xp, self.yp = cx_idx, cy_idx
                 else:
@@ -127,22 +103,28 @@ class WhiteboardProcessor(VideoTransformerBase):
         else:
             self.xp, self.yp = 0, 0
 
-        # 4. Alpha mask fusion: Layer canvas overlay above original camera stream background
-        img_gray = cv2.cvtColor(st.session_state["canvas"], cv2.COLOR_BGR2GRAY)
+        # 4. Alpha mask fusion: Layer canvas overlay above original camera stream
+        img_gray = cv2.cvtColor(self.canvas, cv2.COLOR_BGR2GRAY)
         _, img_inv = cv2.threshold(img_gray, 50, 255, cv2.THRESH_BINARY_INV)
         img_inv = cv2.cvtColor(img_inv, cv2.COLOR_GRAY2BGR)
         img = cv2.bitwise_and(img, img_inv)
-        img = cv2.bitwise_or(img, st.session_state["canvas"])
+        img = cv2.bitwise_or(img, self.canvas)
 
         return img
 
-# Initialize WebRTC Stream layout object wrapper component
-webrtc_streamer(
+# Initialize WebRTC Stream layout component and link context
+ctx = webrtc_streamer(
     key="whiteboard",
     video_processor_factory=WhiteboardProcessor,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={"video": True, "audio": False},
 )
+
+# Handle UI Clear Canvas events out of the frame processing pathway securely
+if st.sidebar.button("Clear Canvas"):
+    if ctx.video_processor:
+        ctx.video_processor.clear_request = True
+        st.sidebar.success("Canvas reset successfully!")
 
 # App interface guide text instructions
 st.markdown("""
