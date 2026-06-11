@@ -4,14 +4,8 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-# Robust fallback wrapper to find the hands sub-module on Linux
-try:
-    from mediapipe.solutions import hands as mp_hands
-except ModuleNotFoundError:
-    try:
-        from mediapipe.python.solutions import hands as mp_hands
-    except ModuleNotFoundError:
-        import mediapipe.solutions.hands as mp_hands
+# Direct, standard module assignment for modern MediaPipe distributions
+mp_hands = mp.solutions.hands
 
 # Configure page settings
 st.set_page_config(page_title="AI Virtual Whiteboard", layout="wide")
