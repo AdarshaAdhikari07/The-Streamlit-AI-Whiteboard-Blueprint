@@ -2,9 +2,16 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 import cv2
 import mediapipe as mp
-# FIX: Explicit sub-module import to bypass Linux namespace bugs on headless cloud servers
-from mediapipe.python.solutions import hands as mp_hands
 import numpy as np
+
+# Robust fallback wrapper to find the hands sub-module on Linux
+try:
+    from mediapipe.solutions import hands as mp_hands
+except ModuleNotFoundError:
+    try:
+        from mediapipe.python.solutions import hands as mp_hands
+    except ModuleNotFoundError:
+        import mediapipe.solutions.hands as mp_hands
 
 # Configure page settings
 st.set_page_config(page_title="AI Virtual Whiteboard", layout="wide")
@@ -29,7 +36,7 @@ color_map = {
 }
 current_color = color_map[color_choice]
 
-# WebRTC configuration for STUN servers (needed for secure cloud streaming)
+# WebRTC configuration for STUN servers
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
@@ -38,7 +45,7 @@ RTC_CONFIGURATION = RTCConfiguration(
 if "canvas" not in st.session_state:
     st.session_state["canvas"] = None
 
-# MediaPipe Hands Setup using the direct module reference
+# Initialize the model instance cleanly
 hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
 
 class WhiteboardProcessor(VideoTransformerBase):
@@ -51,7 +58,7 @@ class WhiteboardProcessor(VideoTransformerBase):
         img = cv2.flip(img, 1) # Mirror image for natural movement matching
         h, w, c = img.shape
 
-        # 2. Lazy initialization of the persistent drawing matrix canvas
+        # 2. Lazy initialization of the canvas
         if st.session_state["canvas"] is None or st.session_state["canvas"].shape[:2] != (h, w):
             st.session_state["canvas"] = np.zeros((h, w, 3), dtype=np.uint8)
 
@@ -63,11 +70,11 @@ class WhiteboardProcessor(VideoTransformerBase):
             for hand_landmarks in results.multi_hand_landmarks:
                 landmarks = hand_landmarks.landmark
                 
-                # Fetch index tip (ID 8) and middle tip (ID 12) normalized coordinates
+                # Fetch index tip (ID 8) and middle tip (ID 12)
                 cx_idx, cy_idx = int(landmarks[8].x * w), int(landmarks[8].y * h)
                 cx_mid, cy_mid = int(landmarks[12].x * w), int(landmarks[12].y * h)
 
-                # Flag check: Is tip coordinate higher than the knuckle joint coordinate?
+                # Check raised fingers
                 index_up = landmarks[8].y < landmarks[6].y
                 middle_up = landmarks[12].y < landmarks[10].y
 
@@ -95,7 +102,7 @@ class WhiteboardProcessor(VideoTransformerBase):
         else:
             self.xp, self.yp = 0, 0
 
-        # 4. Bitwise alpha-blending to merge canvas matrix directly over the webcam background
+        # 4. Merge canvas drawings over the video stream frame
         img_gray = cv2.cvtColor(st.session_state["canvas"], cv2.COLOR_BGR2GRAY)
         _, img_inv = cv2.threshold(img_gray, 50, 255, cv2.THRESH_BINARY_INV)
         img_inv = cv2.cvtColor(img_inv, cv2.COLOR_GRAY2BGR)
@@ -104,7 +111,7 @@ class WhiteboardProcessor(VideoTransformerBase):
 
         return img
 
-# Mount the real-time WebRTC media engine stream
+# Mount the WebRTC components
 webrtc_streamer(
     key="whiteboard",
     video_processor_factory=WhiteboardProcessor,
