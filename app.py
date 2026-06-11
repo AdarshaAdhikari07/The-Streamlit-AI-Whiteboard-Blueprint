@@ -74,3 +74,49 @@ class WhiteboardProcessor(VideoTransformerBase):
                 # MODE 1: Selection/Hover Mode (Both Index and Middle fingers raised)
                 if index_up and middle_up:
                     self.xp, self.yp = 0, 0 # Lift brush anchor
+                    cv2.circle(img, (cx_idx, cy_idx), 15, (255, 255, 255), cv2.FILLED)
+
+                # MODE 2: Active Drawing Mode (Only Index finger raised)
+                elif index_up and not middle_up:
+                    cv2.circle(img, (cx_idx, cy_idx), brush_thickness, current_color, cv2.FILLED)
+                    
+                    if self.xp == 0 and self.yp == 0:
+                        self.xp, self.yp = cx_idx, cy_idx
+
+                    # Modify the session state matrix array safely
+                    if color_choice == "Eraser":
+                        cv2.line(st.session_state["canvas"], (self.xp, self.yp), (cx_idx, cy_idx), (0, 0, 0), brush_thickness * 2)
+                    else:
+                        cv2.line(st.session_state["canvas"], (self.xp, self.yp), (cx_idx, cy_idx), current_color, brush_thickness)
+                    
+                    self.xp, self.yp = cx_idx, cy_idx
+                else:
+                    self.xp, self.yp = 0, 0
+        else:
+            self.xp, self.yp = 0, 0
+
+        # 4. Bitwise alpha-blending to merge canvas matrix directly over the webcam background
+        img_gray = cv2.cvtColor(st.session_state["canvas"], cv2.COLOR_BGR2GRAY)
+        _, img_inv = cv2.threshold(img_gray, 50, 255, cv2.THRESH_BINARY_INV)
+        img_inv = cv2.cvtColor(img_inv, cv2.COLOR_GRAY2BGR)
+        img = cv2.bitwise_and(img, img_inv)
+        img = cv2.bitwise_or(img, st.session_state["canvas"])
+
+        return img
+
+# Mount the real-time WebRTC media engine stream
+webrtc_streamer(
+    key="whiteboard",
+    video_processor_factory=WhiteboardProcessor,
+    rtc_configuration=RTC_CONFIGURATION,
+    media_stream_constraints={"video": True, "audio": False},
+)
+
+# Instructions markdown template
+st.markdown("""
+---
+### 🖐️ How to Use:
+* **Two Fingers Up (Index + Middle):** Selection Mode. Hover without drawing. Moves your 'cursor'.
+* **One Finger Up (Index Only):** Drawing Mode. Start painting in the air!
+* Adjust color and brush size seamlessly using the **Sidebar Controls**.
+""")
