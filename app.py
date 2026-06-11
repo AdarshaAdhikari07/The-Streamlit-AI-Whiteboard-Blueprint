@@ -2,6 +2,7 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 import cv2
 import numpy as np
+import mediapipe as mp
 
 # Configure page settings
 st.set_page_config(page_title="AI Virtual Whiteboard", layout="wide")
@@ -27,36 +28,20 @@ RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-# Initialize canvas state securely
-if "canvas" not in st.session_state:
-    st.session_state["canvas"] = None
-
-# ====================================================================
-# THE FIX: LATE-IMPORT CACHING TO PREVENT THREAD CRASHES
-# ====================================================================
-@st.cache_resource
-def get_hands_detector():
-    # We import mediapipe locally inside the cache so the server thread doesn't panic
-    import mediapipe as mp
-    mp_hands = mp.solutions.hands
-    detector = mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=1,
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.7
-    )
-    return detector, mp_hands
-
-# Load the detector and the module reference safely
-hands_detector, mp_hands_module = get_hands_detector()
-# ====================================================================
-
-
 class WhiteboardProcessor(VideoTransformerBase):
     def __init__(self):
         self.xp, self.yp = 0, 0  
         self.canvas = None       
         self.clear_request = False
+        
+        # INITIALIZE MEDIAPIPE NATIVELY INSIDE THE THREAD
+        # This completely avoids Streamlit caching bugs and namespace errors!
+        self.hands = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
 
     def transform(self, frame):
         # 1. Convert WebRTC frame to numpy array (BGR)
@@ -64,27 +49,25 @@ class WhiteboardProcessor(VideoTransformerBase):
         img = cv2.flip(img, 1) 
         h, w, c = img.shape
 
-        # 2. Local canvas initialization 
+        # 2. Local thread-safe canvas initialization 
         if self.canvas is None or self.canvas.shape[:2] != (h, w):
-            self.canvas = np.zeros((h, w, c), dtype=np.uint8)
+            self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
         if self.clear_request:
-            self.canvas = np.zeros((h, w, c), dtype=np.uint8)
+            self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
             self.clear_request = False
 
         # 3. MediaPipe processing pipeline
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = hands_detector.process(img_rgb)
+        results = self.hands.process(img_rgb)
 
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
                 landmarks = hand_landmarks.landmark
                 
-                # Convert normalized coordinates to pixel locations
                 cx_idx, cy_idx = int(landmarks[8].x * w), int(landmarks[8].y * h)
                 cx_mid, cy_mid = int(landmarks[12].x * w), int(landmarks[12].y * h)
 
-                # Finger detection math checking
                 index_up = landmarks[8].y < landmarks[6].y
                 middle_up = landmarks[12].y < landmarks[10].y
 
@@ -128,6 +111,7 @@ ctx = webrtc_streamer(
     media_stream_constraints={"video": True, "audio": False},
 )
 
+# Handle UI Clear Canvas securely
 if st.sidebar.button("Clear Canvas"):
     if ctx.video_processor:
         ctx.video_processor.clear_request = True
