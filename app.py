@@ -2,10 +2,10 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 import cv2
 import numpy as np
+import mediapipe as mp
 
-# 1. FORCE THE DIRECT SUB-MODULE IMPORTS TO BYPASS LAZY LOADING ISSUES
-import mediapipe.python.solutions.hands as mp_hands
-import mediapipe.python.solutions.drawing_utils as mp_drawing
+# Modern MediaPipe sub-module assignment logic
+mp_hands = mp.solutions.hands
 
 # Configure page settings
 st.set_page_config(page_title="AI Virtual Whiteboard", layout="wide")
@@ -39,9 +39,9 @@ RTC_CONFIGURATION = RTCConfiguration(
 if "canvas" not in st.session_state:
     st.session_state["canvas"] = None
 
-# 2. USE CACHING TO INITIALIZE THE DETECTOR SECURELY ACROSS THREADS
+# Secure the model instance via Streamlit resource caching across background frames
 @st.cache_resource
-def load_hands_model():
+def get_hands_detector():
     return mp_hands.Hands(
         static_image_mode=False,
         max_num_hands=1,
@@ -49,23 +49,23 @@ def load_hands_model():
         min_tracking_confidence=0.7
     )
 
-hands = load_hands_model()
+hands = get_hands_detector()
 
 class WhiteboardProcessor(VideoTransformerBase):
     def __init__(self):
-        self.xp, self.yp = 0, 0  # Drawing coordinate tracking anchor
+        self.xp, self.yp = 0, 0  # Drawing tracking points anchor
 
     def transform(self, frame):
-        # Convert WebRTC frame to numpy array (BGR)
+        # 1. Convert WebRTC frame to numpy array (BGR)
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1) # Mirror image matching
+        img = cv2.flip(img, 1) # Natural horizontal mirroring mirror matching
         h, w, c = img.shape
 
-        # Initialize the persistent canvas overlay surface matrix
+        # 2. Dynamic tracking canvas initialization
         if st.session_state["canvas"] is None or st.session_state["canvas"].shape[:2] != (h, w):
             st.session_state["canvas"] = np.zeros((h, w, 3), dtype=np.uint8)
 
-        # Process the frame frame through the cached hands instance
+        # 3. MediaPipe processing pipeline
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = hands.process(img_rgb)
 
@@ -73,27 +73,27 @@ class WhiteboardProcessor(VideoTransformerBase):
             for hand_landmarks in results.multi_hand_landmarks:
                 landmarks = hand_landmarks.landmark
                 
-                # Fetch index tip (ID 8) and middle tip (ID 12) positions
+                # Convert normalized coordinates to coordinates relative to frame resolution
                 cx_idx, cy_idx = int(landmarks[8].x * w), int(landmarks[8].y * h)
                 cx_mid, cy_mid = int(landmarks[12].x * w), int(landmarks[12].y * h)
 
-                # Flag checking: Is tip Y lower than joint Y? (Lower Y value means higher on screen)
+                # Finger detection math checking
                 index_up = landmarks[8].y < landmarks[6].y
                 middle_up = landmarks[12].y < landmarks[10].y
 
-                # MODE 1: Selection/Hover Mode (Both Index and Middle fingers raised)
+                # MODE 1: Selection Mode (Index + Middle finger raised)
                 if index_up and middle_up:
-                    self.xp, self.yp = 0, 0 # Break drawing link line
+                    self.xp, self.yp = 0, 0 # Lift drawing pen
                     cv2.circle(img, (cx_idx, cy_idx), 15, (255, 255, 255), cv2.FILLED)
 
-                # MODE 2: Active Drawing Mode (Only Index finger raised)
+                # MODE 2: Active Drawing Mode (Index finger only)
                 elif index_up and not middle_up:
                     cv2.circle(img, (cx_idx, cy_idx), brush_thickness, current_color, cv2.FILLED)
                     
                     if self.xp == 0 and self.yp == 0:
                         self.xp, self.yp = cx_idx, cy_idx
 
-                    # Apply drawing straight onto session state canvas overlay mask array
+                    # Apply line transformation logic straight to persistence canvas matrix
                     if color_choice == "Eraser":
                         cv2.line(st.session_state["canvas"], (self.xp, self.yp), (cx_idx, cy_idx), (0, 0, 0), brush_thickness * 2)
                     else:
@@ -105,7 +105,7 @@ class WhiteboardProcessor(VideoTransformerBase):
         else:
             self.xp, self.yp = 0, 0
 
-        # Bitwise masking step: Blend the canvas overlay directly onto live camera video stream
+        # 4. Alpha mask fusion: Layer canvas overlay above original camera stream background
         img_gray = cv2.cvtColor(st.session_state["canvas"], cv2.COLOR_BGR2GRAY)
         _, img_inv = cv2.threshold(img_gray, 50, 255, cv2.THRESH_BINARY_INV)
         img_inv = cv2.cvtColor(img_inv, cv2.COLOR_GRAY2BGR)
@@ -114,7 +114,7 @@ class WhiteboardProcessor(VideoTransformerBase):
 
         return img
 
-# Mount the video streaming handler frame engine
+# Initialize WebRTC Stream layout object wrapper component
 webrtc_streamer(
     key="whiteboard",
     video_processor_factory=WhiteboardProcessor,
@@ -122,7 +122,7 @@ webrtc_streamer(
     media_stream_constraints={"video": True, "audio": False},
 )
 
-# Instructions markdown template
+# App interface guide text instructions
 st.markdown("""
 ---
 ### 🖐️ How to Use:
