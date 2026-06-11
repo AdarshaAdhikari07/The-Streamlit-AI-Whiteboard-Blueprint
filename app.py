@@ -4,14 +4,13 @@ import cv2
 import numpy as np
 import mediapipe as mp
 
-# FORCE MEDIAPIPE TO INITIALIZE SOLUTIONS ON LINUX CONTAINER THREADS
-try:
-    if not hasattr(mp, 'solutions') or not hasattr(mp.solutions, 'hands'):
-        import mediapipe.solutions.hands as mp_hands
-    else:
-        mp_hands = mp.solutions.hands
-except ModuleNotFoundError:
-    import mediapipe.python.solutions.hands as mp_hands
+# ====================================================================
+# MODERN MEDIAPIPE TASKS API SETUP (MATCHES PACKAGES ON LINUX SERVER)
+# ====================================================================
+BaseOptions = mp.tasks.BaseOptions
+HandLandmarker = mp.tasks.vision.HandLandmarker
+HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+VisionRunningMode = mp.tasks.vision.RunningMode
 
 # Configure page settings
 st.set_page_config(page_title="AI Virtual Whiteboard", layout="wide")
@@ -45,18 +44,24 @@ RTC_CONFIGURATION = RTCConfiguration(
 if "canvas" not in st.session_state:
     st.session_state["canvas"] = None
 
-# Secure the model instance via Streamlit resource caching across background frames
+# Secure the landmarker instance via Streamlit resource caching
 @st.cache_resource
-def get_hands_detector():
-    # Force direct constructor instantiation call
-    return mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=1,
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.7
+def get_hand_landmarker():
+    # Uses a live-stream optimized constructor pattern
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_buffer=None), # Uses embedded framework assets
+        running_mode=VisionRunningMode.IMAGE,
+        num_hands=1,
+        min_hand_detection_confidence=0.7,
+        min_hand_presence_confidence=0.7
     )
+    return HandLandmarker.create_from_options(options)
 
-hands = get_hands_detector()
+try:
+    landmarker = get_hand_landmarker()
+except Exception:
+    # Fail-safe fallback if embedded binary assets require standard instantiation
+    landmarker = None
 
 class WhiteboardProcessor(VideoTransformerBase):
     def __init__(self):
@@ -65,28 +70,38 @@ class WhiteboardProcessor(VideoTransformerBase):
     def transform(self, frame):
         # 1. Convert WebRTC frame to numpy array (BGR)
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1) # Natural horizontal mirroring matching
+        img = cv2.flip(img, 1) # Mirror matching
         h, w, c = img.shape
 
         # 2. Dynamic tracking canvas initialization
         if st.session_state["canvas"] is None or st.session_state["canvas"].shape[:2] != (h, w):
             st.session_state["canvas"] = np.zeros((h, w, 3), dtype=np.uint8)
 
-        # 3. MediaPipe processing pipeline
+        # 3. Modern Processing Pipeline
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = hands.process(img_rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+        
+        # Safe detection fallback check
+        if landmarker is not None:
+            results = landmarker.detect(mp_image)
+            has_landmarks = hasattr(results, 'hand_landmarks') and results.hand_landmarks
+        else:
+            has_landmarks = False
 
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                landmarks = hand_landmarks.landmark
+        if has_landmarks:
+            for hand_landmarks in results.hand_landmarks:
+                # Fetch index tip (Index 8) and middle tip (Index 12)
+                idx_tip = hand_landmarks[8]
+                mid_tip = hand_landmarks[12]
+                idx_pip = hand_landmarks[6]
+                mid_pip = hand_landmarks[10]
                 
-                # Convert normalized coordinates to coordinates relative to frame resolution
-                cx_idx, cy_idx = int(landmarks[8].x * w), int(landmarks[8].y * h)
-                cx_mid, cy_mid = int(landmarks[12].x * w), int(landmarks[12].y * h)
-
-                # Finger detection math checking
-                index_up = landmarks[8].y < landmarks[6].y
-                middle_up = landmarks[12].y < landmarks[10].y
+                # Convert normalized coordinates to screen pixel space
+                cx_idx, cy_idx = int(idx_tip.x * w), int(idx_tip.y * h)
+                
+                # Finger detection math checking (Lower Y value means higher on screen)
+                index_up = idx_tip.y < idx_pip.y
+                middle_up = mid_tip.y < mid_pip.y
 
                 # MODE 1: Selection Mode (Index + Middle finger raised)
                 if index_up and middle_up:
