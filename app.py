@@ -34,7 +34,7 @@ class WhiteboardProcessor(VideoTransformerBase):
         self.canvas = None       
         self.clear_request = False
         
-        # Native instantiation inside the isolated thread to bypass namespace issues
+        # Native, isolated framework setup to bypass global thread race conditions
         self.hands = mp.solutions.hands.Hands(
             static_image_mode=False,
             max_num_hands=1,
@@ -45,10 +45,10 @@ class WhiteboardProcessor(VideoTransformerBase):
     def transform(self, frame):
         # 1. Convert WebRTC frame to numpy array (BGR)
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1) # Mirror image matching
+        img = cv2.flip(img, 1) # Mirror matching for intuitive drawing
         h, w, c = img.shape
 
-        # 2. Local thread-safe canvas initialization (Prevents global thread collisions)
+        # 2. Local canvas initialization
         if self.canvas is None or self.canvas.shape[:2] != (h, w):
             self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
@@ -56,7 +56,7 @@ class WhiteboardProcessor(VideoTransformerBase):
             self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
             self.clear_request = False
 
-        # 3. MediaPipe processing pipeline
+        # 3. MediaPipe tracking pipeline
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.hands.process(img_rgb)
 
@@ -64,19 +64,19 @@ class WhiteboardProcessor(VideoTransformerBase):
             for hand_landmarks in results.multi_hand_landmarks:
                 landmarks = hand_landmarks.landmark
                 
-                # Extract landmark coordinate points
+                # Fetch target tracking coordinate points
                 cx_idx, cy_idx = int(landmarks[8].x * w), int(landmarks[8].y * h)
 
-                # Check if fingers are up
+                # Check which fingers are extended
                 index_up = landmarks[8].y < landmarks[6].y
                 middle_up = landmarks[12].y < landmarks[10].y
 
-                # MODE 1: Selection Mode (Index + Middle finger raised)
+                # MODE 1: Hover/Selection Mode (Index + Middle fingers raised)
                 if index_up and middle_up:
                     self.xp, self.yp = 0, 0 # Lift drawing pen
                     cv2.circle(img, (cx_idx, cy_idx), 15, (255, 255, 255), cv2.FILLED)
 
-                # MODE 2: Active Drawing Mode (Index finger only)
+                # MODE 2: Active Drawing Mode (Index finger only raised)
                 elif index_up and not middle_up:
                     cv2.circle(img, (cx_idx, cy_idx), brush_thickness, current_color, cv2.FILLED)
                     
@@ -94,7 +94,7 @@ class WhiteboardProcessor(VideoTransformerBase):
         else:
             self.xp, self.yp = 0, 0
 
-        # 4. Alpha mask fusion
+        # 4. Alpha masking and blending layer fusion
         img_gray = cv2.cvtColor(self.canvas, cv2.COLOR_BGR2GRAY)
         _, img_inv = cv2.threshold(img_gray, 50, 255, cv2.THRESH_BINARY_INV)
         img_inv = cv2.cvtColor(img_inv, cv2.COLOR_GRAY2BGR)
@@ -103,7 +103,7 @@ class WhiteboardProcessor(VideoTransformerBase):
 
         return img
 
-# Initialize WebRTC Stream layout component
+# Initialize WebRTC Stream layout object wrapper component
 ctx = webrtc_streamer(
     key="whiteboard",
     video_processor_factory=WhiteboardProcessor,
@@ -111,7 +111,7 @@ ctx = webrtc_streamer(
     media_stream_constraints={"video": True, "audio": False},
 )
 
-# Handle UI Clear Canvas events out of the frame processing pathway securely
+# Handle UI Clear Canvas events securely out of the video processing pathway
 if st.sidebar.button("Clear Canvas"):
     if ctx.video_processor:
         ctx.video_processor.clear_request = True
