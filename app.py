@@ -34,9 +34,24 @@ class WhiteboardProcessor(VideoTransformerBase):
         self.canvas = None       
         self.clear_request = False
         
-        # INITIALIZE MEDIAPIPE NATIVELY INSIDE THE THREAD
-        # This completely avoids Streamlit caching bugs and namespace errors!
-        self.hands = mp.solutions.hands.Hands(
+        # ADAPTIVE CORE ENGINE LOADING: Robust fallback chain for cross-version cloud wheels
+        try:
+            if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'hands'):
+                self.mp_hands = mp.solutions.hands
+            elif hasattr(mp, 'hands'):
+                self.mp_hands = mp.hands
+            else:
+                import mediapipe.solutions.hands as mp_hands
+                self.mp_hands = mp_hands
+        except (AttributeError, ModuleNotFoundError):
+            try:
+                from mediapipe.python.solutions import hands as flat_hands
+                self.mp_hands = flat_hands
+            except ModuleNotFoundError:
+                self.mp_hands = mp
+
+        # Instantiate tracking class context natively inside the isolated stream thread
+        self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=1,
             min_detection_confidence=0.7,
@@ -49,7 +64,7 @@ class WhiteboardProcessor(VideoTransformerBase):
         img = cv2.flip(img, 1) 
         h, w, c = img.shape
 
-        # 2. Local thread-safe canvas initialization 
+        # 2. Local thread-safe canvas initialization (Prevents global thread collisions)
         if self.canvas is None or self.canvas.shape[:2] != (h, w):
             self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
@@ -71,12 +86,12 @@ class WhiteboardProcessor(VideoTransformerBase):
                 index_up = landmarks[8].y < landmarks[6].y
                 middle_up = landmarks[12].y < landmarks[10].y
 
-                # MODE 1: Selection Mode 
+                # MODE 1: Selection Mode (Index + Middle finger raised)
                 if index_up and middle_up:
                     self.xp, self.yp = 0, 0 
                     cv2.circle(img, (cx_idx, cy_idx), 15, (255, 255, 255), cv2.FILLED)
 
-                # MODE 2: Active Drawing Mode
+                # MODE 2: Active Drawing Mode (Index finger only)
                 elif index_up and not middle_up:
                     cv2.circle(img, (cx_idx, cy_idx), brush_thickness, current_color, cv2.FILLED)
                     
