@@ -34,29 +34,40 @@ class WhiteboardProcessor(VideoTransformerBase):
         self.canvas = None       
         self.clear_request = False
         
-        # ADAPTIVE CORE ENGINE LOADING: Robust fallback chain for cross-version cloud wheels
-        try:
-            if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'hands'):
-                self.mp_hands = mp.solutions.hands
-            elif hasattr(mp, 'hands'):
-                self.mp_hands = mp.hands
-            else:
-                import mediapipe.solutions.hands as mp_hands
-                self.mp_hands = mp_hands
-        except (AttributeError, ModuleNotFoundError):
-            try:
-                from mediapipe.python.solutions import hands as flat_hands
-                self.mp_hands = flat_hands
-            except ModuleNotFoundError:
-                self.mp_hands = mp
+        # 1. INITIALIZE MODERN TASKS API STRUCTURE DIRECTLY IN WORKER THREAD
+        BaseOptions = mp.tasks.BaseOptions
+        HandLandmarker = mp.tasks.vision.HandLandmarker
+        HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+        VisionRunningMode = mp.tasks.vision.RunningMode
 
-        # Instantiate tracking class context natively inside the isolated stream thread
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.7
+        options = HandLandmarkerOptions(
+            base_options=BaseOptions(
+                model_asset_path=None # Bypasses custom file calls to load embedded weights
+            ),
+            running_mode=VisionRunningMode.IMAGE,
+            num_hands=1,
+            min_hand_detection_confidence=0.7,
+            min_hand_presence_confidence=0.7
         )
+        
+        # Fallback initializer handling structural variations on headless containers
+        try:
+            self.detector = HandLandmarker.create_from_options(options)
+            self.use_legacy_mode = False
+        except Exception:
+            # Safe runtime fallback path if system bindings revert to standard solutions maps
+            try:
+                self.legacy_hands = mp.solutions.hands.Hands(
+                    static_image_mode=False, max_num_hands=1,
+                    min_detection_confidence=0.7, min_tracking_confidence=0.7
+                )
+            except AttributeError:
+                from mediapipe.python.solutions import hands as flat_hands
+                self.legacy_hands = flat_hands.Hands(
+                    static_image_mode=False, max_num_hands=1,
+                    min_detection_confidence=0.7, min_tracking_confidence=0.7
+                )
+            self.use_legacy_mode = True
 
     def transform(self, frame):
         # 1. Convert WebRTC frame to numpy array (BGR)
@@ -64,7 +75,7 @@ class WhiteboardProcessor(VideoTransformerBase):
         img = cv2.flip(img, 1) 
         h, w, c = img.shape
 
-        # 2. Local thread-safe canvas initialization (Prevents global thread collisions)
+        # 2. Local thread-safe canvas matrix surface initialization
         if self.canvas is None or self.canvas.shape[:2] != (h, w):
             self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
@@ -72,19 +83,38 @@ class WhiteboardProcessor(VideoTransformerBase):
             self.canvas = np.zeros((h, w, 3), dtype=np.uint8)
             self.clear_request = False
 
-        # 3. MediaPipe processing pipeline
+        # 3. Processing Pipeline Execution Block
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = self.hands.process(img_rgb)
+        
+        if not self.use_legacy_mode:
+            # Modern Image format mapping pipeline
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+            results = self.detector.detect(mp_image)
+            has_landmarks = hasattr(results, 'hand_landmarks') and results.hand_landmarks
+            landmarks_source = results.hand_landmarks if has_landmarks else []
+        else:
+            # Legacy solution process map fallback
+            results = self.legacy_hands.process(img_rgb)
+            has_landmarks = hasattr(results, 'multi_hand_landmarks') and results.multi_hand_landmarks
+            landmarks_source = results.multi_hand_landmarks if has_landmarks else []
 
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                landmarks = hand_landmarks.landmark
+        if has_landmarks:
+            for hand_landmarks in landmarks_source:
+                # Map standard landmark node indexes cleanly regardless of engine mode
+                if self.use_legacy_mode:
+                    landmarks = hand_landmarks.landmark
+                    idx_tip, idx_pip = landmarks[8], landmarks[6]
+                    mid_tip, mid_pip = landmarks[12], landmarks[10]
+                else:
+                    idx_tip, idx_pip = hand_landmarks[8], hand_landmarks[6]
+                    mid_tip, mid_pip = hand_landmarks[12], hand_landmarks[10]
                 
-                cx_idx, cy_idx = int(landmarks[8].x * w), int(landmarks[8].y * h)
-                cx_mid, cy_mid = int(landmarks[12].x * w), int(landmarks[12].y * h)
+                # Fetch positions mapped down to frame width and height resolution
+                cx_idx, cy_idx = int(idx_tip.x * w), int(idx_tip.y * h)
 
-                index_up = landmarks[8].y < landmarks[6].y
-                middle_up = landmarks[12].y < landmarks[10].y
+                # Flag checking: Raised tracking analysis (Lower Y is higher on view canvas)
+                index_up = idx_tip.y < idx_pip.y
+                middle_up = mid_tip.y < mid_pip.y
 
                 # MODE 1: Selection Mode (Index + Middle finger raised)
                 if index_up and middle_up:
@@ -109,7 +139,7 @@ class WhiteboardProcessor(VideoTransformerBase):
         else:
             self.xp, self.yp = 0, 0
 
-        # 4. Alpha mask fusion
+        # 4. Alpha mask fusion layout blending step
         img_gray = cv2.cvtColor(self.canvas, cv2.COLOR_BGR2GRAY)
         _, img_inv = cv2.threshold(img_gray, 50, 255, cv2.THRESH_BINARY_INV)
         img_inv = cv2.cvtColor(img_inv, cv2.COLOR_GRAY2BGR)
